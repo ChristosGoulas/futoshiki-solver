@@ -1,0 +1,20 @@
+# Build artifacts
+futoshiki
+futoshiki-debug
+*.o
+*.d
+*.dSYM/
+*.a
+*.so
+*.exe
+
+# Test output
+*.out
+tests/*.actual
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~

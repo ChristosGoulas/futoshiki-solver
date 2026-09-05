@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        compiler: [cc, gcc, clang]
+        exclude:
+          # gcc is an alias for clang on macOS runners.
+          - os: macos-latest
+            compiler: gcc
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: make CC=${{ matrix.compiler }}
+
+      - name: Build debug (sanitizers)
+        run: make debug CC=${{ matrix.compiler }}
+
+      - name: Test
+        run: make test
+
+      - name: Test debug build
+        run: ./tests/run_tests.sh ./futoshiki-debug
+
+      - name: Check formatting
+        if: matrix.os == 'ubuntu-latest' && matrix.compiler == 'clang'
+        run: |
+          sudo apt-get install -y clang-format
+          clang-format --dry-run --Werror futoshiki.c
