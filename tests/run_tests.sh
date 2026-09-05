@@ -49,6 +49,8 @@ check "example puzzle2 solves" 0 "Solved" \
     "$BINARY" --quiet --seed 42 "$EXAMPLES_DIR/puzzle2.fut"
 check "example puzzle3 solves" 0 "Solved" \
     "$BINARY" --quiet --seed 42 "$EXAMPLES_DIR/puzzle3.fut"
+check "example puzzle4 solves with --size 4" 0 "Solved" \
+    "$BINARY" --quiet --seed 42 --size 4 "$EXAMPLES_DIR/puzzle4.fut"
 
 # Givens must survive the search. In the boxed output, line 4 is grid row 0:
 # puzzle1 has a given 5 at (0,4) -> row 0 must end with "| 5 |";
@@ -68,6 +70,15 @@ if printf '%s\n' "$puzzle2_output" | sed -n '4p' | grep -qE '^\| 4 \|'; then
 else
     fail_count=$((fail_count + 1))
     printf 'FAIL %s\n' "example puzzle2 keeps given"
+fi
+# puzzle4 has a given 1 at (0,0) -> row 0 must start with "| 1 |".
+puzzle4_output=$("$BINARY" -q -s 42 --size 4 "$EXAMPLES_DIR/puzzle4.fut" 2>&1)
+if printf '%s\n' "$puzzle4_output" | sed -n '4p' | grep -qE '^\| 1 \|'; then
+    pass_count=$((pass_count + 1))
+    printf 'ok   %s\n' "example puzzle4 keeps given"
+else
+    fail_count=$((fail_count + 1))
+    printf 'FAIL %s\n' "example puzzle4 keeps given"
 fi
 
 # Reading from stdin must behave like reading the file.

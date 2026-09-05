@@ -33,18 +33,18 @@ Futoshiki (不等式, "inequality") is a logic puzzle played on an N×N grid:
 - Inequality signs (`>` / `<`) placed between cells must be respected.
 - Some cells may be pre-filled ("givens") and must not change.
 
-> **Note:** this solver enforces the *row* uniqueness rule by construction and the
-> inequality constraints by search, but it does **not** currently enforce column
-> uniqueness. Solutions therefore satisfy all givens and inequalities, but may
-> repeat a digit within a column. Enforcing the full Latin-square rules is on the
-> [roadmap](#roadmap).
+> **Note:** row uniqueness is enforced by construction (every row is built as a
+> permutation of 1..N), while column uniqueness and the inequality constraints are
+> enforced by the search itself. If the search stagnates it restarts from a fresh
+> random grid (see [docs/DESIGN.md](docs/DESIGN.md)); very large `--size` values may
+> take noticeably longer, or occasionally fail, to converge.
 
 ## Features
 
-- 5×5 puzzles (configurable at compile time)
-- Arbitrary inequality constraints between any two cells
+- Full Latin-square rules (row *and* column uniqueness) plus arbitrary inequality constraints
+- Runtime-configurable grid size via `--size` (default 5×5, up to 50×50)
 - Fixed (given) cells with full input validation
-- Simulated-annealing solver with geometric cooling and stagnation detection
+- Simulated-annealing solver with geometric cooling, stagnation detection, and automatic restarts
 - Single-file, standard C11 — no dependencies beyond libc and libm
 
 ## Getting started
@@ -67,6 +67,7 @@ make
 ./futoshiki < examples/puzzle1.fut         # or from stdin
 ./futoshiki --quiet examples/puzzle1.fut   # final grid only
 ./futoshiki --seed 42 examples/puzzle1.fut # reproducible run
+./futoshiki --size 4                       # solve an unconstrained 4x4 grid
 ./futoshiki --help                         # all options
 ```
 
@@ -79,12 +80,19 @@ fixed <row> <col> <value>   a given cell
 gt <r1> <c1> <r2> <c2>      cell (r1,c1) must be greater than cell (r2,c2)
 ```
 
-All coordinates are 0-based, i.e. in the range `0`–`4` for the default 5×5 grid. Example ([examples/puzzle1.fut](examples/puzzle1.fut)):
+All coordinates are 0-based, i.e. in the range `0`–`4` for the default 5×5 grid (or `0`–`N-1` when `--size N` is given). Example ([examples/puzzle1.fut](examples/puzzle1.fut)):
 
 ```text
 fixed 0 4 5
 gt 0 4 0 3
 gt 1 0 2 0
+```
+
+The puzzle file itself doesn't encode a grid size — it's always the `--size` option (default 5).
+[examples/puzzle4.fut](examples/puzzle4.fut) is a 4×4 puzzle and needs `--size 4` to solve:
+
+```sh
+./futoshiki --size 4 examples/puzzle4.fut
 ```
 
 ### Example session
@@ -114,6 +122,7 @@ Without `--quiet`, the trace shows every improving state as it is found.
 |---|---|
 | `-q`, `--quiet` | Print only the final grid |
 | `-s`, `--seed N` | Seed the RNG for a reproducible run |
+| `-n`, `--size N` | Solve an N×N grid instead of the default 5×5 (2 ≤ N ≤ 50) |
 | `-h`, `--help` | Show usage and exit |
 
 ## How it works
@@ -133,9 +142,9 @@ make clean
 ## Roadmap
 
 - [x] Read puzzles from a file / stdin instead of interactive prompts
-- [ ] Enforce column uniqueness in the cost function (full Latin-square rules)
+- [x] Enforce column uniqueness in the cost function (full Latin-square rules)
 - [x] Pretty grid output with `--quiet` / `--verbose` flags
-- [ ] Runtime-configurable grid size
+- [x] Runtime-configurable grid size
 
 ## Contributing
 

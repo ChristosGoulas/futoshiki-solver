@@ -2,13 +2,14 @@
  * futoshiki.c -- a Futoshiki puzzle solver using simulated annealing.
  *
  * The puzzle is read from a file (or stdin), an initial randomized grid is
- * built with each row a permutation of 1..GRID_SIZE, and the search
- * iteratively swaps two non-fixed cells within a row. The cost of a state
- * is the number of violated inequality constraints; the search ends when
- * the cost reaches zero.
+ * built with each row a permutation of 1..N (N is runtime-configurable via
+ * --size), and the search iteratively swaps two non-fixed cells within a
+ * row. The cost of a state is the number of violated inequality constraints
+ * plus the number of duplicate values within any column; the search ends
+ * when the cost reaches zero.
  *
  * Build:  cc -std=c11 -O2 -Wall -Wextra -Wpedantic -o futoshiki futoshiki.c -lm
- * Usage:  ./futoshiki [--quiet] [--seed N] [puzzle-file]
+ * Usage:  ./futoshiki [--quiet] [--seed N] [--size N] [puzzle-file]
  */
 
 #include <math.h>
@@ -21,7 +22,9 @@
  * Configuration
  */
 
-#define GRID_SIZE 5 /* number of rows and columns */
+#define DEFAULT_GRID_SIZE 5 /* number of rows and columns unless --size is given */
+#define MIN_GRID_SIZE 2     /* a smaller grid has no room for a swap move */
+#define MAX_GRID_SIZE 50    /* sanity cap for --size to keep memory/time bounded */
 #define INITIAL_TEMPERATURE 10.0f
 #define COOLING_RATE 0.999f
 
@@ -31,11 +34,18 @@
 
 /* The search gives up after this many consecutive rejections, in the same
    multiples of the free-cell count. */
-#define MAX_STAGNATION_FACTOR 6
+#define MAX_STAGNATION_FACTOR 40
 
 /* Upper bound on retries while filling one row; a row that needs more
    attempts than this is almost certainly infeasible. */
 #define MAX_FILL_TRIES 1000
+
+/* If the search stagnates, restart from a fresh random grid this many times
+   before giving up. */
+#define MAX_RESTARTS 150
+
+/* Rows and columns of the puzzle; set from --size, defaults to DEFAULT_GRID_SIZE. */
+static int grid_size = DEFAULT_GRID_SIZE;
 
 /*
  * Types
@@ -98,16 +108,16 @@ static float random_float(void)
     return (float)random_value / (float)RAND_MAX;
 }
 
-/* Return a random column index in the range [1, GRID_SIZE]. */
+/* Return a random column index in the range [1, grid_size]. */
 static int random_column(void)
 {
-    return 1 + rand() % GRID_SIZE;
+    return 1 + rand() % grid_size;
 }
 
-/* Return a random row index in the range [1, GRID_SIZE]. */
+/* Return a random row index in the range [1, grid_size]. */
 static int random_row(void)
 {
-    return 1 + rand() % GRID_SIZE;
+    return 1 + rand() % grid_size;
 }
 
 /*
@@ -119,18 +129,18 @@ static int** grid_create(void)
     int** new_grid;
     int i, j;
 
-    new_grid = malloc((size_t)GRID_SIZE * sizeof(*new_grid));
+    new_grid = malloc((size_t)grid_size * sizeof(*new_grid));
     if (new_grid == NULL) {
         die("cannot allocate the grid.");
     }
-    for (i = 0; i < GRID_SIZE; i++) {
-        new_grid[i] = malloc((size_t)GRID_SIZE * sizeof(*new_grid[i]));
+    for (i = 0; i < grid_size; i++) {
+        new_grid[i] = malloc((size_t)grid_size * sizeof(*new_grid[i]));
         if (new_grid[i] == NULL) {
             die("cannot allocate a grid row.");
         }
     }
-    for (i = 0; i < GRID_SIZE; i++) {
-        for (j = 0; j < GRID_SIZE; j++) {
+    for (i = 0; i < grid_size; i++) {
+        for (j = 0; j < grid_size; j++) {
             new_grid[i][j] = 0;
         }
     }
@@ -144,7 +154,7 @@ static void grid_destroy(int** grid_to_free)
     if (grid_to_free == NULL) {
         return;
     }
-    for (i = 0; i < GRID_SIZE; i++) {
+    for (i = 0; i < grid_size; i++) {
         free(grid_to_free[i]);
     }
     free(grid_to_free);
@@ -154,9 +164,21 @@ static void grid_copy(int** destination, int** source)
 {
     int i, j;
 
-    for (i = 0; i < GRID_SIZE; i++) {
-        for (j = 0; j < GRID_SIZE; j++) {
+    for (i = 0; i < grid_size; i++) {
+        for (j = 0; j < grid_size; j++) {
             destination[i][j] = source[i][j];
+        }
+    }
+}
+
+/* Reset every cell to 0 so initialize_grid() can rebuild a fresh grid. */
+static void grid_clear(int** grid_to_clear)
+{
+    int i, j;
+
+    for (i = 0; i < grid_size; i++) {
+        for (j = 0; j < grid_size; j++) {
+            grid_to_clear[i][j] = 0;
         }
     }
 }
@@ -166,17 +188,17 @@ static void grid_print(int** grid_to_print)
     int i, j;
 
     printf("+");
-    for (j = 0; j < GRID_SIZE; j++) {
+    for (j = 0; j < grid_size; j++) {
         printf("---+");
     }
     printf("\n");
-    for (i = 0; i < GRID_SIZE; i++) {
+    for (i = 0; i < grid_size; i++) {
         printf("|");
-        for (j = 0; j < GRID_SIZE; j++) {
+        for (j = 0; j < grid_size; j++) {
             printf(" %d |", grid_to_print[i][j]);
         }
         printf("\n+");
-        for (j = 0; j < GRID_SIZE; j++) {
+        for (j = 0; j < grid_size; j++) {
             printf("---+");
         }
         printf("\n");
@@ -217,14 +239,14 @@ static void puzzle_load(Puzzle* puzzle, FILE* fp, const char* source_name)
                         source_name, line_number);
                 exit(EXIT_FAILURE);
             }
-            if (a < 0 || a >= GRID_SIZE || b < 0 || b >= GRID_SIZE) {
+            if (a < 0 || a >= grid_size || b < 0 || b >= grid_size) {
                 fprintf(stderr, "Error: %s:%d: fixed cell coordinates out of range.\n", source_name,
                         line_number);
                 exit(EXIT_FAILURE);
             }
-            if (c < 1 || c > GRID_SIZE) {
+            if (c < 1 || c > grid_size) {
                 fprintf(stderr, "Error: %s:%d: fixed value must be in the range 1-%d.\n",
-                        source_name, line_number, GRID_SIZE);
+                        source_name, line_number, grid_size);
                 exit(EXIT_FAILURE);
             }
             for (j = 0; j < puzzle->fixed_cell_count; j++) {
@@ -234,7 +256,7 @@ static void puzzle_load(Puzzle* puzzle, FILE* fp, const char* source_name)
                     exit(EXIT_FAILURE);
                 }
                 /* Duplicate givens in a row make the puzzle unsolvable: the
-                   solver builds each row as a permutation of 1..GRID_SIZE. */
+                   solver builds each row as a permutation of 1..grid_size. */
                 if (puzzle->fixed_cells[j].row == a && puzzle->fixed_cells[j].value == c) {
                     fprintf(stderr, "Error: %s:%d: two fixed cells share the same row and value.\n",
                             source_name, line_number);
@@ -259,8 +281,8 @@ static void puzzle_load(Puzzle* puzzle, FILE* fp, const char* source_name)
                         line_number);
                 exit(EXIT_FAILURE);
             }
-            if (a < 0 || a >= GRID_SIZE || b < 0 || b >= GRID_SIZE || c < 0 || c >= GRID_SIZE ||
-                d < 0 || d >= GRID_SIZE) {
+            if (a < 0 || a >= grid_size || b < 0 || b >= grid_size || c < 0 || c >= grid_size ||
+                d < 0 || d >= grid_size) {
                 fprintf(stderr, "Error: %s:%d: constraint coordinates out of range.\n", source_name,
                         line_number);
                 exit(EXIT_FAILURE);
@@ -298,7 +320,7 @@ static void puzzle_load(Puzzle* puzzle, FILE* fp, const char* source_name)
         exit(EXIT_FAILURE);
     }
 
-    puzzle->free_cell_count = GRID_SIZE * GRID_SIZE - puzzle->fixed_cell_count;
+    puzzle->free_cell_count = grid_size * grid_size - puzzle->fixed_cell_count;
 
     /* Shrink both arrays to their exact size (or release them when empty). */
     if (puzzle->fixed_cell_count == 0) {
@@ -332,7 +354,7 @@ static int row_contains(int** grid_to_search, int row, int value)
 {
     int i;
 
-    for (i = 0; i < GRID_SIZE; i++) {
+    for (i = 0; i < grid_size; i++) {
         if (grid_to_search[row][i] == value) {
             return 1;
         }
@@ -341,7 +363,7 @@ static int row_contains(int** grid_to_search, int row, int value)
 }
 
 /* Build a valid initial grid while preserving fixed cells: every row ends
-   up as a permutation of 1..GRID_SIZE. */
+   up as a permutation of 1..grid_size. */
 static void initialize_grid(Puzzle* puzzle)
 {
     int i, j, value;
@@ -352,10 +374,10 @@ static void initialize_grid(Puzzle* puzzle)
             puzzle->fixed_cells[i].value;
     }
 
-    for (i = 0; i < GRID_SIZE; i++) {
+    for (i = 0; i < grid_size; i++) {
         tries = 0;
-        for (j = 0; j < GRID_SIZE; j++) {
-            value = random_column(); /* [1, GRID_SIZE] */
+        for (j = 0; j < grid_size; j++) {
+            value = random_column(); /* [1, grid_size] */
 
             if (puzzle->grid[i][j] == 0) {
                 if (row_contains(puzzle->grid, i, value) == 0) {
@@ -372,7 +394,32 @@ static void initialize_grid(Puzzle* puzzle)
     }
 }
 
-/* Cost of a state: the number of violated inequality constraints. */
+/* Number of duplicate values within columns: for each column and value,
+   every occurrence past the first counts as one violation. */
+static int count_column_violations(int** grid_to_score)
+{
+    int column, value, row, occurrences;
+    int violation_count = 0;
+
+    for (column = 0; column < grid_size; column++) {
+        for (value = 1; value <= grid_size; value++) {
+            occurrences = 0;
+            for (row = 0; row < grid_size; row++) {
+                if (grid_to_score[row][column] == value) {
+                    occurrences++;
+                }
+            }
+            if (occurrences > 1) {
+                violation_count += occurrences - 1;
+            }
+        }
+    }
+    return violation_count;
+}
+
+/* Cost of a state: violated inequality constraints plus duplicate values
+   within any column. Row uniqueness is maintained by construction, so it
+   never contributes to the cost. */
 static int count_violations(const Puzzle* puzzle, int** grid_to_score)
 {
     int i;
@@ -386,6 +433,7 @@ static int count_violations(const Puzzle* puzzle, int** grid_to_score)
             violation_count++;
         }
     }
+    violation_count += count_column_violations(grid_to_score);
     return violation_count;
 }
 
@@ -412,8 +460,9 @@ static void random_swap(const Puzzle* puzzle, int** candidate_grid)
     candidate_grid[row][column2] = swapped_value;
 }
 
-/* Apply one simulated-annealing acceptance decision for the candidate. */
-static void simulated_annealing_step(Puzzle* puzzle, Solver* solver, int** candidate_grid)
+/* Apply one simulated-annealing acceptance decision for the candidate.
+   Returns 1 if the search has stagnated (caller should restart), 0 otherwise. */
+static int simulated_annealing_step(Puzzle* puzzle, Solver* solver, int** candidate_grid)
 {
     int cost_difference;
     float acceptance_probability = 0;
@@ -453,16 +502,22 @@ static void simulated_annealing_step(Puzzle* puzzle, Solver* solver, int** candi
             solver->stagnation_counter++;
             solver->rejected_since_cooling++;
             if (solver->stagnation_counter >= max_stagnation) {
-                die("no solution found; the search stagnated.");
+                grid_destroy(candidate_copy);
+                return 1;
             }
         }
     }
     grid_destroy(candidate_copy);
+    return 0;
 }
 
+/* Runs the annealing search, restarting from a fresh random grid whenever it
+   stagnates. Column uniqueness adds local minima that a single cooling run
+   can get stuck in; restarts make the overall search robust to that. */
 static void solve_futoshiki(Puzzle* puzzle, Solver* solver)
 {
     int** candidate_grid;
+    int restarts = 0;
 
     candidate_grid = grid_create();
     while (count_violations(puzzle, puzzle->grid) > 0) {
@@ -471,7 +526,16 @@ static void solve_futoshiki(Puzzle* puzzle, Solver* solver)
         random_swap(puzzle, candidate_grid);
         solver->current_cost = count_violations(puzzle, puzzle->grid);
         solver->candidate_cost = count_violations(puzzle, candidate_grid);
-        simulated_annealing_step(puzzle, solver, candidate_grid);
+        if (simulated_annealing_step(puzzle, solver, candidate_grid)) {
+            if (++restarts >= MAX_RESTARTS) {
+                die("no solution found after several restarts; the puzzle may be infeasible.");
+            }
+            solver->temperature = INITIAL_TEMPERATURE;
+            solver->stagnation_counter = 0;
+            solver->rejected_since_cooling = 0;
+            grid_clear(puzzle->grid);
+            initialize_grid(puzzle);
+        }
     }
     grid_destroy(candidate_grid);
 }
@@ -491,13 +555,14 @@ static void print_usage(const char* program_name)
             "Options:\n"
             "  -q, --quiet       print only the final grid\n"
             "  -s, --seed SEED   seed the RNG for a reproducible run\n"
+            "  -n, --size N      use an N x N grid (default %d, max %d)\n"
             "  -h, --help        show this help and exit\n"
             "\n"
             "Puzzle file format (one directive per line, '#' starts a comment):\n"
             "  fixed <row> <col> <value>   a given cell\n"
             "  gt <r1> <c1> <r2> <c2>      cell (r1,c1) must be greater than cell (r2,c2)\n"
             "All coordinates are 0-based.\n",
-            program_name);
+            program_name, DEFAULT_GRID_SIZE, MAX_GRID_SIZE);
 }
 
 int main(int argc, char* argv[])
@@ -507,6 +572,7 @@ int main(int argc, char* argv[])
     const char* input_path = NULL;
     unsigned int seed = 0;
     int seed_given = 0;
+    int requested_size;
     int i;
     FILE* fp;
 
@@ -528,6 +594,18 @@ int main(int argc, char* argv[])
                 return EXIT_FAILURE;
             }
             seed_given = 1;
+        } else if (strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "--size") == 0) {
+            i++;
+            if (i >= argc || sscanf(argv[i], "%d", &requested_size) != 1) {
+                fprintf(stderr, "Error: option '%s' needs an integer grid size.\n", argv[i - 1]);
+                return EXIT_FAILURE;
+            }
+            if (requested_size < MIN_GRID_SIZE || requested_size > MAX_GRID_SIZE) {
+                fprintf(stderr, "Error: --size must be between %d and %d.\n", MIN_GRID_SIZE,
+                        MAX_GRID_SIZE);
+                return EXIT_FAILURE;
+            }
+            grid_size = requested_size;
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "Error: unknown option '%s'.\n", argv[i]);
             print_usage(argv[0]);
